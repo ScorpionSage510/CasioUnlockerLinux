@@ -4,6 +4,12 @@
 #include <unistd.h>
 #include <string.h>
 
+// --- INCLUSION DES IMAGES (EMBEDDED) ---
+// Ces fichiers doivent être générés avec xxd -i
+#include "logo.h"
+#include "graph_old.h"
+#include "graph_new.h"
+
 // --- CONFIGURATION USB ---
 #define CASIO_VENDOR_ID 0x07cf
 
@@ -15,9 +21,16 @@ unsigned char cmd2[] = {0x18, 0x30, 0x30, 0x30, 0x37, 0x30};
 GtkWidget *status_label;
 GtkWidget *window;
 
+// --- FONCTION UTILITAIRE : Charger image depuis mémoire ---
+GdkPixbuf *load_pixbuf_from_memory(const unsigned char *data, unsigned int len, int width, int height) {
+    GInputStream *stream = g_memory_input_stream_new_from_data(data, len, NULL);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream_at_scale(stream, width, height, TRUE, NULL, NULL);
+    g_object_unref(stream);
+    return pixbuf;
+}
+
 // --- LOGIQUE BACKEND (LIBUSB) ---
 
-// Fonction de scan pour l'affichage (ne connecte pas, juste liste)
 int scan_devices(char *output_buffer) {
     libusb_context *ctx = NULL;
     libusb_device **devs;
@@ -56,25 +69,20 @@ int scan_devices(char *output_buffer) {
     return 1;
 }
 
-// Fonction principale de déverrouillage
 void perform_unlock() {
     libusb_context *ctx = NULL;
     libusb_device_handle *dev_handle = NULL;
     libusb_device **devs;
     libusb_device *dev = NULL;
     int r, actual;
-    
-    // Variables dynamiques pour les endpoints
     int ep_out = -1, ep_in = -1, ep_intr = -1;
 
-    // Feedback visuel immédiat
     gtk_label_set_text(GTK_LABEL(status_label), "Traitement en cours...");
     while (gtk_events_pending()) gtk_main_iteration(); 
 
     libusb_init(&ctx);
     ssize_t cnt = libusb_get_device_list(ctx, &devs);
     
-    // Recherche du device
     for (int i = 0; i < cnt; i++) {
         struct libusb_device_descriptor desc;
         libusb_get_device_descriptor(devs[i], &desc);
@@ -92,7 +100,6 @@ void perform_unlock() {
         return;
     }
 
-    // Scan des Endpoints (IN/OUT/INTERRUPT)
     struct libusb_config_descriptor *config;
     libusb_get_active_config_descriptor(dev, &config);
     if (!config) libusb_get_config_descriptor(dev, 0, &config);
@@ -105,17 +112,12 @@ void perform_unlock() {
                 for (int l = 0; l < interdesc->bNumEndpoints; l++) {
                     const struct libusb_endpoint_descriptor *epdesc = &interdesc->endpoint[l];
                     
-                    // Bulk OUT (Ecriture)
                     if ((epdesc->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
                         if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT)
                             if (ep_out == -1) ep_out = epdesc->bEndpointAddress;
-                    }
-                    // Bulk IN (Lecture)
-                    if ((epdesc->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
                         if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
                             if (ep_in == -1) ep_in = epdesc->bEndpointAddress;
                     }
-                    // Interrupt IN
                     if ((epdesc->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_INTERRUPT) {
                          if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
                             ep_intr = epdesc->bEndpointAddress;
@@ -132,47 +134,33 @@ void perform_unlock() {
         goto exit_unlock;
     }
 
-    // Détachement du pilote noyau (Crucial pour Linux)
     if(libusb_kernel_driver_active(dev_handle, 0) == 1)
         libusb_detach_kernel_driver(dev_handle, 0);
 
     libusb_claim_interface(dev_handle, 0);
-    
-    // Nettoyage préventif
     libusb_clear_halt(dev_handle, ep_out);
     if(ep_in != -1) libusb_clear_halt(dev_handle, ep_in);
 
-    // 1. Envoi Control Init
     libusb_control_transfer(dev_handle, 0x41, 0x01, 0, 0, NULL, 0, 1000);
 
     unsigned char buf[512];
-    // Vidange interruption
     if (ep_intr != -1) libusb_interrupt_transfer(dev_handle, ep_intr, buf, sizeof(buf), &actual, 50);
 
-    // 2. Envoi Commande 1 + ZLP + Lecture réponse
     r = libusb_bulk_transfer(dev_handle, ep_out, cmd1, sizeof(cmd1), &actual, 2000);
     if(r == 0) {
-        libusb_bulk_transfer(dev_handle, ep_out, NULL, 0, &actual, 1000); // ZLP
-        
-        // Lecture de la réponse (Indispensable pour éviter le blocage sur certains modèles)
-        if (ep_in != -1) {
-            libusb_bulk_transfer(dev_handle, ep_in, buf, sizeof(buf), &actual, 1500);
-        }
+        libusb_bulk_transfer(dev_handle, ep_out, NULL, 0, &actual, 1000); 
+        if (ep_in != -1) libusb_bulk_transfer(dev_handle, ep_in, buf, sizeof(buf), &actual, 1500);
     } else {
         gtk_label_set_text(GTK_LABEL(status_label), "Erreur: Echec envoi commande 1");
         goto exit_unlock;
     }
 
-    usleep(200000); // Pause 0.2s
+    usleep(200000);
 
-    // 3. Envoi Commande 2 + ZLP
     r = libusb_bulk_transfer(dev_handle, ep_out, cmd2, sizeof(cmd2), &actual, 2000);
     if(r == 0) {
         libusb_bulk_transfer(dev_handle, ep_out, NULL, 0, &actual, 1000);
-        
-        // Tentative lecture confirmation (optionnel mais propre)
         if (ep_in != -1) libusb_bulk_transfer(dev_handle, ep_in, buf, sizeof(buf), &actual, 500);
-
         gtk_label_set_text(GTK_LABEL(status_label), "SUCCÈS : Mode Examen désactivé !");
     } else {
         gtk_label_set_text(GTK_LABEL(status_label), "Erreur: Echec envoi confirmation");
@@ -218,16 +206,18 @@ void on_info_clicked(GtkWidget *widget, gpointer data) {
     gtk_container_set_border_width(GTK_CONTAINER(grid), 20);
     gtk_container_add(GTK_CONTAINER(content_area), grid);
 
-    // --- COLONNE 1 : Graph 35+E (Vieux) ---
+    // --- COLONNE 1 : Graph 35+E ---
     lbl_title_old = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(lbl_title_old), "<b>GRAPH 35+E (Ancien)</b>");
     
-    pixbuf = gdk_pixbuf_new_from_file_at_scale("Images/graph35+e.jpeg", 200, -1, TRUE, NULL);
+    // CHARGEMENT DEPUIS LA MEMOIRE (Variables générées par xxd)
+    // Images_graph35_e_jpeg et Images_graph35_e_jpeg_len viennent de graph_old.h
+    pixbuf = load_pixbuf_from_memory(Images_graph35_e_jpeg, Images_graph35_e_jpeg_len, 200, -1);
     if (pixbuf) {
         img_old = gtk_image_new_from_pixbuf(pixbuf);
         g_object_unref(pixbuf);
     } else {
-        img_old = gtk_label_new("[Image non trouvée]");
+        img_old = gtk_label_new("[Image erreur]");
     }
 
     lbl_desc_old = gtk_label_new("Ce logiciel est conçu pour\ndésactiver le mode examen\nsur ce modèle via USB.\n\n"
@@ -248,20 +238,19 @@ void on_info_clicked(GtkWidget *widget, gpointer data) {
     gtk_grid_attach(GTK_GRID(grid), lbl_desc_old, 0, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), lbl_steps_old, 0, 3, 1, 1);
 
-
     // --- COLONNE 2 : Graph 35+E II ---
     lbl_title_new = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(lbl_title_new), "<b>GRAPH 35+E II (Nouveau)</b>");
 
-    pixbuf = gdk_pixbuf_new_from_file_at_scale("Images/graph35+eII.jpeg", 200, -1, TRUE, NULL);
+    // CHARGEMENT DEPUIS LA MEMOIRE
+    pixbuf = load_pixbuf_from_memory(Images_graph35_eII_jpeg, Images_graph35_eII_jpeg_len, 200, -1);
     if (pixbuf) {
         img_new = gtk_image_new_from_pixbuf(pixbuf);
         g_object_unref(pixbuf);
     } else {
-        img_new = gtk_label_new("[Image non trouvée]");
+        img_new = gtk_label_new("[Image erreur]");
     }
 
-    // Info compatibilité spécifique à la colonne 2
     lbl_compat_new = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(lbl_compat_new), "<span foreground='#2E8B57' size='small'><b>✅ Compatible tous systèmes d'exploitation</b></span>");
     
@@ -289,20 +278,20 @@ int main(int argc, char *argv[]) {
     GtkWidget *btn_refresh, *btn_unlock, *btn_info;
     GtkWidget *lbl_header, *lbl_warning, *img_logo;
     GdkPixbuf *logo_pixbuf;
-    GError *error = NULL;
 
     gtk_init(&argc, &argv);
 
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Casio Unlocker Linux");
-    gtk_window_set_default_size(GTK_WINDOW(window), 450, 450); // Ajusté pour le contenu
+    gtk_window_set_default_size(GTK_WINDOW(window), 450, 450);
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
-    // Chargement de l'icône de la fenêtre
-    if(!gtk_window_set_icon_from_file(GTK_WINDOW(window), "Images/logo.png", &error)) {
-        g_warning("Attention: Icône non chargée: %s", error->message);
-        g_error_free(error);
+    // Chargement icône fenêtre depuis mémoire
+    // Images_logo_png et Images_logo_png_len viennent de logo.h
+    logo_pixbuf = load_pixbuf_from_memory(Images_logo_png, Images_logo_png_len, -1, -1);
+    if(logo_pixbuf) {
+        gtk_window_set_icon(GTK_WINDOW(window), logo_pixbuf);
     }
 
     grid = gtk_grid_new();
@@ -311,8 +300,8 @@ int main(int argc, char *argv[]) {
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
     gtk_container_set_border_width(GTK_CONTAINER(grid), 20);
 
-    // Logo dans l'interface
-    logo_pixbuf = gdk_pixbuf_new_from_file_at_scale("Images/logo.png", 64, 64, TRUE, NULL);
+    // Logo interface (redimensionné à 64x64)
+    logo_pixbuf = load_pixbuf_from_memory(Images_logo_png, Images_logo_png_len, 64, 64);
     if(logo_pixbuf) {
         img_logo = gtk_image_new_from_pixbuf(logo_pixbuf);
         gtk_grid_attach(GTK_GRID(grid), img_logo, 0, 0, 2, 1);
