@@ -48,10 +48,10 @@ Vous avez deux choix : télécharger l'application prête à l'emploi OU la comp
 Pas besoin de compiler.
 
 1. Allez dans la section **[Releases](../../releases)** de ce dépôt.
-2. Téléchargez le fichier **`CasioUnlocker_Linux.AppImage`** (ou le `.zip`).
+2. Téléchargez le fichier **`Casio_Unlocker-x86_64.AppImage`** (ou le `.zip`).
 3. Rendez le fichier exécutable :
    ```bash
-   chmod +x CasioUnlocker_Linux.AppImage
+   chmod +x Casio_Unlocker-x86_64.AppImage
 
 ## 📜 Licence
 
